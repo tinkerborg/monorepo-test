@@ -35,3 +35,8 @@ class MessageError(Exception):
     """Error from ms.error event."""
 
     pass
+    
+class TimeoutError(Exception):
+    """Websocket time out."""
+
+    pass

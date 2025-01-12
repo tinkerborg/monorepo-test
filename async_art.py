@@ -21,6 +21,7 @@ import uuid
 from . import exceptions, helper
 from .command import SamsungTVCommand
 from .async_connection import SamsungTVWSAsyncConnection
+from .remote import SamsungTVWS
 from .event import D2D_SERVICE_MESSAGE_EVENT, MS_CHANNEL_READY_EVENT
 from .async_rest import SamsungTVAsyncRest
 from .helper import get_ssl_context
@@ -72,6 +73,13 @@ class SamsungTVAsyncArt(SamsungTVWSAsyncConnection):
         self.session = None
         self.pending_requests = {}
         self.callbacks = {}
+        self.get_token()
+            
+    def get_token(self):
+        '''
+        Open and close remote control websocket to get/check token
+        '''
+        tv = SamsungTVWS(self.host, port=self.port, token=self.token, token_file=self.token_file, timeout=self.timeout)
 
     async def open(self):
         await super().open()
@@ -88,19 +96,21 @@ class SamsungTVAsyncArt(SamsungTVWSAsyncConnection):
             raise exceptions.ConnectionFailure(response)
 
         return self.connection
-        
+
     async def close(self):
-        if self.session and not self.session.closed:
+        if self.session:
             await self.session.close()
         await super().close()
-        
+   
     async def start_listening(self) -> None:
         # Override base class to process events
-        await super().start_listening(self.process_event)
-        try:
-            await self.get_artmode()
-        except AssertionError:
-            pass
+        if not self.is_alive():
+            await self.open()
+        if await super().start_listening(self.process_event):
+            try:
+                await self.get_artmode()
+            except AssertionError:
+                pass
             
     def get_uuid(self):
         self.art_uuid = str(uuid.uuid4())
@@ -126,14 +136,16 @@ class SamsungTVAsyncArt(SamsungTVWSAsyncConnection):
     async def _send_art_request(
         self,
         request_data: Dict[str, Any],
-        wait_for_event: Optional[str] = None
+        wait_for_event: Optional[str] = None,
+        timeout: int = 2
     ) -> Optional[Dict[str, Any]]:
         if not request_data.get("id"):
             request_data["id"] = self.get_uuid()            #old api
         request_data["request_id"] = request_data["id"]     #new api
         self.pending_requests[wait_for_event or request_data["id"]] = asyncio.Future()
+        await self.start_listening()
         await self.send_command(ArtChannelEmitCommand.art_app_request(request_data))
-        return await self.wait_for_response(wait_for_event or request_data["id"])
+        return await self.wait_for_response(wait_for_event or request_data["id"], timeout)
         
     async def process_event(self, event=None, response=None):
         if event == D2D_SERVICE_MESSAGE_EVENT:
@@ -179,27 +191,28 @@ class SamsungTVAsyncArt(SamsungTVWSAsyncConnection):
         if self._rest_api is None:
             self._rest_api = SamsungTVAsyncRest(host=self.host, port=self.port, session=self.session)
         return self._rest_api
+        
+    async def _get_device_info(self):
+        try:
+            await asyncio.sleep(0.1)    #do not hit rest api to frequently
+            return await self._get_rest_api().rest_device_info()
+        except Exception as e:
+            pass
+        return {}
 
     async def supported(self) -> bool:
-        try:
-            await asyncio.sleep(0.1)    #do not hit rest api to frequently
-            data = await self._get_rest_api().rest_device_info()
-            return data.get("device", {}).get("FrameTVSupport") == "true"
-        except Exception as e:
-            pass
-        return False
+        data = await self._get_device_info()
+        return data.get("device", {}).get("FrameTVSupport") == "true"
         
     async def on(self) -> bool:
-        try:
-            await asyncio.sleep(0.1)    #do not hit rest api to frequently
-            data = await self._get_rest_api().rest_device_info()
-            return data.get("device", {}).get('PowerState', 'off') == 'on'
-        except Exception as e:
-            pass
-        return False
+        data = await self._get_device_info()
+        return data.get("device", {}).get('PowerState', 'off') == 'on'
         
     async def is_artmode(self) -> bool:
         return await self.on() and self.art_mode
+        
+    async def in_artmode(self) -> bool:
+        return await self.on() and await self.get_artmode() == 'on'
         
     async def get_api_version(self):
         data = await self._send_art_request(
@@ -219,12 +232,13 @@ class SamsungTVAsyncArt(SamsungTVWSAsyncConnection):
         assert data
         return data
 
-    async def available(self, category=None):
+    async def available(self, category=None, timeout=2):
         '''
         category is 'MY-C0004' or 'MY-C0002' where 4 is favourites, 2 is my pictures, and 8 is store
         '''
         data = await self._send_art_request(
-            {"request": "get_content_list", "category": category}
+            {"request": "get_content_list", "category": category},
+            timeout=timeout
         )
         assert data
         return [ v for v in json.loads(data["content_list"]) if v['category_id'] == category] if category else json.loads(data["content_list"])
@@ -398,7 +412,7 @@ class SamsungTVAsyncArt(SamsungTVWSAsyncConnection):
             thumbnail_data_dict[filename] = thumbnail_data
         return thumbnail_data_dict if as_dict else list(thumbnail_data_dict.values()) if len(content_id_list) > 1 else thumbnail_data
 
-    async def upload(self, file, matte="shadowbox_polar", portrait_matte="shadowbox_polar", file_type="png", date=None):
+    async def upload(self, file, matte="shadowbox_polar", portrait_matte="shadowbox_polar", file_type="png", date=None, timeout=10):
         '''
         NOTE: both id's and request_id have to be the same
         '''
@@ -453,7 +467,7 @@ class SamsungTVAsyncArt(SamsungTVWSAsyncConnection):
         writer.write(file)
         await writer.drain()
         writer.close()
-        data = await self.wait_for_response("image_added", timeout=10)
+        data = await self.wait_for_response("image_added", timeout=timeout)
         return data["content_id"] if data else None
 
     async def delete(self, content_id):

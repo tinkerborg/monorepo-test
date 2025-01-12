@@ -10,12 +10,12 @@ import asyncio
 import contextlib
 import json
 import logging
-import ssl
 from types import TracebackType
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Union
 
 from websockets.client import WebSocketClientProtocol, connect
 from websockets.exceptions import ConnectionClosed
+from websockets.protocol import State
 
 from . import connection, exceptions, helper
 from .command import SamsungTVCommand, SamsungTVSleepCommand
@@ -45,7 +45,7 @@ class SamsungTVWSAsyncConnection(connection.SamsungTVWSBaseConnection):
         await self.close()
 
     async def open(self) -> WebSocketClientProtocol:
-        if self.connection:
+        if self.is_alive():
             # someone else already created a new connection
             return self.connection
 
@@ -83,14 +83,15 @@ class SamsungTVWSAsyncConnection(connection.SamsungTVWSBaseConnection):
         self, callback: Optional[Callable[[str, Any], Optional[Awaitable[None]]]] = None
     ) -> None:
         """Open, and start listening."""
-        if self.connection:
-            raise exceptions.ConnectionFailure("Connection already exists")
+        if not self._recv_loop:
+            if not self.is_alive():
+                self.connection = await self.open()
 
-        self.connection = await self.open()
-
-        self._recv_loop = asyncio.ensure_future(
-            self._do_start_listening(callback, self.connection)
-        )
+            self._recv_loop = asyncio.ensure_future(
+                self._do_start_listening(callback, self.connection)
+            )
+            return True
+        return False
 
     async def _do_start_listening(
         self,
@@ -98,6 +99,7 @@ class SamsungTVWSAsyncConnection(connection.SamsungTVWSBaseConnection):
         connection: WebSocketClientProtocol,
     ) -> None:
         """Do start listening."""
+        _LOGGING.debug("Listening Connection Started")
         with contextlib.suppress(ConnectionClosed):
             while True:
                 data = await connection.recv()
@@ -108,9 +110,11 @@ class SamsungTVWSAsyncConnection(connection.SamsungTVWSBaseConnection):
                     awaitable = callback(event, response)
                     if awaitable:
                         await awaitable
+        _LOGGING.debug("Listening Connection closed")
+        self._recv_loop = None
 
     async def close(self) -> None:
-        if self.connection:
+        if self.is_alive():
             await self.connection.close()
             if self._recv_loop:
                 await self._recv_loop
@@ -123,7 +127,7 @@ class SamsungTVWSAsyncConnection(connection.SamsungTVWSBaseConnection):
         commands: Sequence[Union[SamsungTVCommand, Dict[str, Any]]],
         key_press_delay: Optional[float] = None,
     ) -> None:
-        if self.connection is None:
+        if not self.is_alive():
             self.connection = await self.open()
 
         delay = self.key_press_delay if key_press_delay is None else key_press_delay
@@ -166,4 +170,4 @@ class SamsungTVWSAsyncConnection(connection.SamsungTVWSBaseConnection):
         await asyncio.sleep(delay)
 
     def is_alive(self) -> bool:
-        return self.connection is not None and not self.connection.closed
+        return self.connection is not None and self.connection.state is State.OPEN

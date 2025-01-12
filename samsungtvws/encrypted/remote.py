@@ -10,6 +10,7 @@ from typing import List, Optional
 import aiohttp
 from websockets.client import WebSocketClientProtocol, connect
 from websockets.exceptions import ConnectionClosed
+from websockets.protocol import State
 
 from ..exceptions import ConnectionFailure
 from .command import SamsungTVEncryptedCommand
@@ -183,4 +184,4 @@ class SamsungTVEncryptedWSAsyncRemote:
         LOGGER.debug("Connection closed")
 
     def is_alive(self) -> bool:
-        return self._connection is not None and not self._connection.closed
+        return self._connection is not None and self.connection.state is State.OPEN
